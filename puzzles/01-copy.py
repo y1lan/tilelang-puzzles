@@ -104,7 +104,15 @@ def tl_copy_1d_multi_threads(A):
     A: T.Tensor((N,), T.float16)
     B = T.empty((N,), T.float16)
 
-    # TODO: Implement this function
+    # The body of the kernel function is written in TileLang DSL.
+    # We use T.Kernel to launch a kernel.
+    with T.Kernel(1, threads=128) as _:
+        # Here T.copy is a built-in TileOp in TileLang.
+        # It will automatically utilize available threads in the block
+        # to do efficient memory copy (including auto parallelism and vectorization)
+        # As we only launch one thread here, it will be lowered into a serial loop copy
+        # with certain bit width vectorization (like 128 bits per copy).
+        T.copy(A, B)
 
     return B
 
@@ -152,6 +160,10 @@ def tl_copy_1d_parallel(A, BLOCK_N: int):
     B = T.empty((N,), T.float16)
 
     # TODO: Implement this function
+    with T.Kernel(T.ceildiv(N, BLOCK_N), threads=128) as bx:
+        start = bx * BLOCK_N
+        end = start + BLOCK_N
+        T.copy(A[start:end], B[start:end])
 
     return B
 
