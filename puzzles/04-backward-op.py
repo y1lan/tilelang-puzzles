@@ -12,7 +12,7 @@ import tilelang
 import tilelang.language as T
 import torch
 
-from common.utils import test_puzzle
+from common.utils import bench_puzzle, test_puzzle
 
 """
 Consider the fused vector multiplication ReLU example from the previous puzzle.
@@ -55,7 +55,13 @@ def tl_mul_relu_bcast(A, B, BLOCK_N: int, BLOCK_M: int):
     C = T.empty((N, M), dtype)
 
     # TODO: Implement this function
-
+    with T.Kernel(N // BLOCK_N, M // BLOCK_M, threads=128) as (bx, by):
+        A_local = T.alloc_shared((BLOCK_N, BLOCK_M), dtype)
+        B_local = T.alloc_shared((BLOCK_M,), dtype)
+        T.copy(A[bx * BLOCK_N, by * BLOCK_M], A_local)
+        T.copy(B[by * BLOCK_M], B_local)
+        for i, j in T.Parallel(BLOCK_N, BLOCK_M):
+            C[bx * BLOCK_N + i, by * BLOCK_M + j] = T.max(A_local[i, j] * B_local[j], T.float16(0))
     return C
 
 
@@ -69,6 +75,13 @@ def run_mul_relu_bcast():
         tl_mul_relu_bcast,
         ref_mul_relu_bcast,
         {"N": N, "M": M, "BLOCK_N": BLOCK_N, "BLOCK_M": BLOCK_M},
+    )
+    bench_puzzle(
+        tl_mul_relu_bcast,
+        ref_mul_relu_bcast,
+        {"N": N, "M": M, "BLOCK_N": BLOCK_N, "BLOCK_M": BLOCK_M},
+        "mul_relu_bcast",
+        True,
     )
 
 
@@ -129,6 +142,17 @@ def tl_mul_relu_bwd(A, B, dC, BLOCK_N: int, BLOCK_M: int):
     dA = T.empty((N, M), dtype)
 
     # TODO: Implement this function
+    with T.Kernel(N // BLOCK_N, M // BLOCK_M, threads=128) as (bx, by):
+        A_local = T.alloc_shared((BLOCK_N, BLOCK_M), dtype)
+        B_local = T.alloc_shared((BLOCK_M,), dtype)
+        dC_local = T.alloc_shared((BLOCK_N, BLOCK_M), dtype)
+        T.copy(A[bx * BLOCK_N, by * BLOCK_M], A_local)
+        T.copy(B[by * BLOCK_M], B_local)
+        T.copy(dC[bx * BLOCK_N, by * BLOCK_M], dC_local)
+        for i, j in T.Parallel(BLOCK_N, BLOCK_M):
+            x = dC_local[i, j] * B_local[j]
+            grad = A_local[i, j] * B_local[j]
+            dA[bx * BLOCK_N + i, by * BLOCK_M + j] = T.if_then_else( grad > 0, x, 0)
 
     return dA
 
@@ -145,6 +169,13 @@ def run_mul_relu_bwd():
         tl_mul_relu_bwd,
         ref_mul_relu_bwd,
         {"N": N, "M": M, "BLOCK_N": BLOCK_N, "BLOCK_M": BLOCK_M},
+    )
+    bench_puzzle(
+        tl_mul_relu_bwd,
+        ref_mul_relu_bwd,
+        {"N": N, "M": M, "BLOCK_N": BLOCK_N, "BLOCK_M": BLOCK_M},
+        "mul_relu_bwd",
+        True,
     )
 
 
