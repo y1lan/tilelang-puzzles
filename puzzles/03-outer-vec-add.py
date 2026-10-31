@@ -11,7 +11,7 @@ import tilelang
 import tilelang.language as T
 import torch
 
-from common.utils import test_puzzle
+from common.utils import bench_puzzle, test_puzzle
 
 """
 Consider an outer vector addition operation. The result is a matrix where
@@ -58,6 +58,14 @@ def tl_outer_add(A, B, BLOCK_N: int, BLOCK_M: int):
     C = T.empty((N, M), dtype)
 
     # TODO: Implement this function
+    with T.Kernel(N // BLOCK_N, M // BLOCK_M, threads=128) as (bx, by):
+        A_local = T.alloc_shared((BLOCK_N,), dtype)
+        B_local = T.alloc_shared((BLOCK_M,), dtype)
+        T.copy(A[bx * BLOCK_N], A_local)
+        T.copy(B[by * BLOCK_M], B_local)
+
+        for i, j in T.Parallel(BLOCK_N, BLOCK_M):
+            C[bx*BLOCK_N + i, by *BLOCK_M + j] = A_local[i] + B_local[j]
 
     return C
 
@@ -72,6 +80,13 @@ def run_outer_add():
         tl_outer_add,
         ref_outer_add,
         {"N": N, "M": M, "BLOCK_N": BLOCK_N, "BLOCK_M": BLOCK_M},
+    )
+    bench_puzzle(
+        tl_outer_add,
+        ref_outer_add,
+        {"N": N, "M": M, "BLOCK_N": BLOCK_N, "BLOCK_M": BLOCK_M},
+        "outer-vec-add",
+        True
     )
 
 
