@@ -64,7 +64,14 @@ def tl_reduce_sum(A, BLOCK_N: int, BLOCK_M: int):
     B = T.empty((N,), dtype)
 
     # TODO: Implement this function
-
+    with T.Kernel(N // BLOCK_N, threads=128) as (bx):
+        A_local = T.alloc_shared((BLOCK_N, BLOCK_M), dtype)
+        B_local = T.alloc_fragment((BLOCK_N,), dtype)
+        T.fill(B_local, T.float32(0))
+        for j in T.serial(M // BLOCK_M):
+            T.copy(A[bx * BLOCK_N, j * BLOCK_M], A_local)
+            T.reduce_sum(A_local, B_local, dim=1, clear=False)
+        T.copy(B_local, B[bx * BLOCK_N])
     return B
 
 
