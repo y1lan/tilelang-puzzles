@@ -10,6 +10,7 @@ tilelang.disable_cache()
 
 from tilelang.jit import JITKernel, JITImpl
 from tilelang.engine.param import KernelParam
+from tilelang.profiler.bench import do_bench
 
 import torch
 
@@ -125,31 +126,17 @@ def bench_puzzle(
     # As the kernel may modify the input tensors, we make a copy of them.
     # inputs_copy = [i.clone() for i in inputs_in_torch_tensors]
 
+    cases = dict()
     if bench_torch:
-        for _ in range(warmups):
-            puzzle_torch(*inputs_in_torch_tensors)
+        cases["PyTorch"] =  lambda :puzzle_torch(*inputs_in_torch_tensors)
+    cases[f"{bench_name}"] = lambda :tl_kernel(*inputs_in_torch_tensors)
 
-        torch_start = torch.cuda.Event(enable_timing=True)
-        torch_end = torch.cuda.Event(enable_timing=True)
-        torch.cuda.synchronize()
-        torch_start.record()
-        for _ in range(repeats):
-            puzzle_torch(*inputs_in_torch_tensors)
-        torch_end.record()
-        torch.cuda.synchronize()
-        torch_time = torch_start.elapsed_time(torch_end) / repeats
-        print(f"Torch time: {torch_time:.3f} ms")
-
-    for _ in range(warmups):
-        tl_kernel(*inputs_in_torch_tensors)
-
-    tl_start = torch.cuda.Event(enable_timing=True)
-    tl_end = torch.cuda.Event(enable_timing=True)
-    torch.cuda.synchronize()
-    tl_start.record()
-    for _ in range(repeats):
-        tl_kernel(*inputs_in_torch_tensors)
-    tl_end.record()
-    torch.cuda.synchronize()
-    tl_time = tl_start.elapsed_time(tl_end) / repeats
-    print(f"{bench_name} time: {tl_time:.3f} ms")
+    for name, fn in cases.items():
+        ms = do_bench(
+            fn,
+            backend="cudagraph",
+            warmup=warmups,
+            rep=repeats,
+            return_mode="median",
+        )
+        print(f"{name} time: {ms:.4f} ms")
