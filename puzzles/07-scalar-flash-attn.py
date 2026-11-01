@@ -82,6 +82,64 @@ def tl_scalar_flash_attn(Q, K, V, BLOCK_B: int, BLOCK_S: int):
     O = T.empty((B, S), dtype)
 
     # TODO: Implement this function
+    with T.Kernel(B, threads=512) as (bx):
+        Q_row = T.alloc_fragment((1, S), dtype)
+        QK_row = T.alloc_fragment((1, S), dtype)
+
+        T.copy(Q[bx, 0], Q_row)
+        T.copy(K[bx, 0], QK_row)
+        for i in T.Parallel(S):
+            QK_row[0, i] = Q_row[0, i] * QK_row[0, i]
+        QK_row_max = T.alloc_fragment((1,), dtype)
+
+        T.reduce_max(QK_row, QK_row_max, dim=1)
+        for i in T.Parallel(S):
+            QK_row[0, i] = T.exp2(log2_e * (QK_row[0, i] - QK_row_max[0]))
+
+        QK_row_sum = T.alloc_fragment((1,), dtype)
+
+        T.reduce_sum(QK_row, QK_row_sum, dim=1)
+        for i in T.Parallel(S):
+            O[bx, i] = QK_row[0, i] / QK_row_sum[0] * V[bx, i]
+
+    # with T.Kernel(B // BLOCK_B, threads=256) as (bx):
+    #     Q_tile = T.alloc_shared((BLOCK_B, BLOCK_S), dtype)
+    #     QK_tile = T.alloc_shared((BLOCK_B, BLOCK_S), dtype)
+
+    #     QK_tile_max = T.alloc_shared((BLOCK_B,), dtype)
+    #     QK_new_max = T.alloc_shared((BLOCK_B,), dtype)
+    #     QK_tile_sum = T.alloc_shared((BLOCK_B,), dtype)
+
+    #     QK_row_max = T.alloc_shared((BLOCK_B,), dtype)
+    #     QK_row_sum = T.alloc_shared((BLOCK_B,), dtype)
+
+    #     T.fill(QK_row_max, -T.infinity(dtype))
+    #     T.fill(QK_row_sum, T.float32(0))
+    #     for k in T.serial(S // BLOCK_S):
+    #         T.copy(Q[bx * BLOCK_B, k * BLOCK_S], Q_tile)
+    #         T.copy(K[bx * BLOCK_B, k * BLOCK_S], QK_tile)
+    #         for i, j in T.Parallel(BLOCK_B, BLOCK_S):
+    #             QK_tile[i, j] = Q_tile[i, j] * QK_tile[i, j]
+    #         T.copy(QK_tile, O[bx * BLOCK_B, k * BLOCK_S])
+    #         T.reduce_max(QK_tile, QK_tile_max, dim=1)
+    #         for i, j in T.Parallel(BLOCK_B, BLOCK_S):
+    #             QK_tile[i, j] = T.exp2(log2_e * (QK_tile[i, j] - QK_tile_max[i]))
+    #         T.reduce_sum(QK_tile, QK_tile_sum, dim=1)
+
+    #         for i in T.Parallel(BLOCK_B):
+    #             QK_new_max[i] = T.max(QK_tile_max[i], QK_row_max[i])
+    #             QK_row_sum[i] = QK_row_sum[i] * T.exp2(
+    #                 log2_e * (QK_row_max[i] - QK_new_max[i])
+    #             ) + QK_tile_sum[i] * T.exp2(log2_e * (QK_tile_max[i] - QK_new_max[i]))
+    #             QK_row_max[i] = QK_new_max[i]
+
+    #     # now we have row_max, row_sum, next, we can compute the final result
+    #     for i, j in T.Parallel(BLOCK_B, S):
+    #         O[bx * BLOCK_B + i, j] = (
+    #             T.exp2(log2_e * (O[bx * BLOCK_B + i, j] - QK_row_max[i]))
+    #             * V[bx * BLOCK_B + i, j]
+    #             / QK_row_sum[i]
+    #         )
 
     return O
 
