@@ -85,6 +85,20 @@ def tl_softmax(A, BLOCK_N: int, BLOCK_M: int):
 
     # TODO: Implement this function
 
+    # TODO: Implement this function
+    with T.Kernel(N, threads=256) as (bx):
+        row = T.alloc_fragment((1, M), dtype)
+        T.copy(A[bx, 0], row)
+        row_max = T.alloc_fragment((1,), dtype)
+        T.reduce_max(row, row_max, dim=1)
+
+        for i in T.Parallel(M):
+            row[0, i] = T.exp2(log2_e * (row[0, i] - row_max[0]))
+        row_sum = T.alloc_fragment((1,), dtype)
+        T.reduce_sum(row, row_sum, dim=1)
+        for i in T.Parallel(M):
+            B[bx, i] = row[0, i] / row_sum[0]
+
     return B
 
 
