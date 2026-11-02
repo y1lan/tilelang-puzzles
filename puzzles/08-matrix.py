@@ -63,17 +63,28 @@ def tl_gemv(A, B, BLOCK_M: int, BLOCK_K: int):
     C = T.empty((M,), dtype)
 
     # TODO: Implement this function
-    
+    with T.Kernel(M // BLOCK_M, threads=256) as (bx):
+        A_tile = T.alloc_fragment((BLOCK_M, BLOCK_K), accum_dtype)
+        C_acc = T.alloc_fragment((BLOCK_M,), accum_dtype)
+        T.clear(C_acc)
+        T.clear(A_tile)
+        for k in T.serial(K // BLOCK_K):
+            for i, j in T.Parallel(BLOCK_M, BLOCK_K):
+                row = bx * BLOCK_M + i
+                col = k * BLOCK_K + j
+                A_tile[i, j] += T.cast(A[row, col], accum_dtype) * T.cast(B[col], accum_dtype)
+        T.reduce_sum(A_tile, C_acc, dim=1)
+        T.copy(C_acc, C[bx * BLOCK_M])
     return C
 
 
 def run_gemv():
     print("\n=== Matrix-Vector Multiplication ===\n")
 
-    M = 4096
+    M = 8192
     K = 4096
-    BLOCK_M = 128
-    BLOCK_K = 32
+    BLOCK_M = 2
+    BLOCK_K = 1024
 
     test_puzzle(tl_gemv, ref_gemv, {"M": M, "K": K, "BLOCK_M": BLOCK_M, "BLOCK_K": BLOCK_K})
     bench_puzzle(
@@ -142,9 +153,19 @@ def tl_matmul_naive(A, B, BLOCK_M: int, BLOCK_N: int, BLOCK_K: int):
     A: T.Tensor((M, K), dtype)
     B: T.Tensor((K, N), dtype)
     C = T.empty((M, N), dtype)
-
     # TODO: Implement this function
+    with T.Kernel(M // BLOCK_M, N // BLOCK_N, threads=32) as (bx, by):
+        A_tile = T.alloc_shared((BLOCK_M, BLOCK_K), dtype)
+        B_tile = T.alloc_shared((BLOCK_K, BLOCK_N), dtype)
+        C_tile = T.alloc_fragment((BLOCK_M, BLOCK_N), accum_dtype)
+        T.use_swizzle(panel_size=10, enable=True)
+        T.clear(C_tile)
+        for k in T.serial(K // BLOCK_K):
+            T.copy(A[bx * BLOCK_M, k * BLOCK_K], A_tile)
+            T.copy(B[k * BLOCK_K, by * BLOCK_N], B_tile)
+            T.gemm(A_tile, B_tile, C_tile)
 
+        T.copy(C_tile, C[bx * BLOCK_M, by * BLOCK_N])
     return C
 
 
@@ -209,7 +230,16 @@ improvement.
 
 
 @tilelang.jit
-def tl_matmul_opt(A, B, BLOCK_M: int, BLOCK_N: int, BLOCK_K: int):
+def tl_matmul_opt(
+    A,
+    B,
+    BLOCK_M: int,
+    BLOCK_N: int,
+    BLOCK_K: int,
+    THREADS: int = 256,
+    STAGES: int = 3,
+    USE_SWIZZLE: bool = True,
+):
     M, N, K = T.const("M, N, K")
     dtype = T.float16
     accum_dtype = T.float32
@@ -219,37 +249,49 @@ def tl_matmul_opt(A, B, BLOCK_M: int, BLOCK_N: int, BLOCK_K: int):
 
     # TODO: Implement this function
 
+    with T.Kernel(M // BLOCK_M, N // BLOCK_N, threads=THREADS) as (bx, by):
+        A_tile = T.alloc_shared((BLOCK_M, BLOCK_K), dtype)
+        B_tile = T.alloc_shared((BLOCK_K, BLOCK_N), dtype)
+        C_tile = T.alloc_fragment((BLOCK_M, BLOCK_N), accum_dtype)
+        T.use_swizzle(panel_size=10, enable=USE_SWIZZLE)
+        T.clear(C_tile)
+        for k in T.Pipelined(K // BLOCK_K, num_stages=STAGES):
+            T.copy(A[bx * BLOCK_M, k * BLOCK_K], A_tile)
+            T.copy(B[k * BLOCK_K, by * BLOCK_N], B_tile)
+            T.gemm(A_tile, B_tile, C_tile)
+
+        T.copy(C_tile, C[bx * BLOCK_M, by * BLOCK_N])
     return C
 
 
 def run_matmul_opt():
-    print("\n=== Matrix Multiplication ===\n")
+    M = N = K = 4096
+    configs = [
+        # (32, 128, 32, 128, 2, True),
+        # (32, 128, 16, 128, 2, True),
+        (64, 128, 32, 128, 2, True),
+        # (64, 128, 16, 128, 2, True),
+    ]
 
-    M = 4096
-    N = 4096
-    K = 4096
-    BLOCK_M = 128
-    BLOCK_N = 128
-    BLOCK_K = 64
-    args_dict = {
-        "M": M,
-        "N": N,
-        "K": K,
-        "BLOCK_M": BLOCK_M,
-        "BLOCK_N": BLOCK_N,
-        "BLOCK_K": BLOCK_K,
-    }
-
-    print("Naive Matmul Implementation: ")
-    naive_matmul_kernel = tl_matmul_naive.compile(**args_dict)
-    naive_matmul_kernel.print_source_code()
-
-    print("OPT Matmul Implementation: ")
-    opt_matmul_kernel = tl_matmul_opt.compile(**args_dict)
-    opt_matmul_kernel.print_source_code()
-
-    bench_puzzle(tl_matmul_naive, ref_matmul, args_dict, bench_torch=True)
-    bench_puzzle(tl_matmul_opt, ref_matmul, args_dict, bench_torch=True)
+    print("\n=== Matrix Multiplication Configuration Sweep ===\n")
+    print("M=N=K=4096; each case uses 10 warmups and 100 repetitions (median).")
+    for block_m, block_n, block_k, threads, stages, use_swizzle in configs:
+        args_dict = {
+            "M": M,
+            "N": N,
+            "K": K,
+            "BLOCK_M": block_m,
+            "BLOCK_N": block_n,
+            "BLOCK_K": block_k,
+            "THREADS": threads,
+            "STAGES": stages,
+            "USE_SWIZZLE": use_swizzle,
+        }
+        label = f"BM={block_m}, BN={block_n}, BK={block_k}, Threads={threads}, Stages={stages}, Swizzle={use_swizzle}"
+        print(label)
+        # test_puzzle(tl_matmul_opt, ref_matmul, args_dict)
+        # bench_puzzle(tl_matmul_naive, ref_matmul, args_dict, bench_name="naive", bench_torch=True)
+        bench_puzzle(tl_matmul_opt, ref_matmul, args_dict, bench_name="pipeline", bench_torch=True)
 
 
 if __name__ == "__main__":
