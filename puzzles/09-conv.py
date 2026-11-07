@@ -96,7 +96,18 @@ def tl_conv1d_naive(X, K, BLOCK_N: int, BLOCK_L: int):
     O = T.empty((N, L), dtype)
 
     # TODO: Implement this function
-
+    with T.Kernel(N, threads=64) as (bx):
+        X_row = T.alloc_shared((L,), accum_dtype)
+        X_reduce = T.alloc_fragment((L,), accum_dtype)
+        K_local = T.alloc_shared((KL,), accum_dtype)
+        T.copy(X[bx, 0], X_row)
+        T.clear(X_reduce)
+        T.copy(K, K_local)
+        for i in T.serial(KL):
+            for j in T.Parallel(L):
+                if j + i < L:
+                    X_reduce[j] += X_row[j + i] * K_local[i]
+        T.copy(X_reduce, O[bx, 0])
     return O
 
 
@@ -202,7 +213,29 @@ def tl_conv1d_multi_outchannel(X, K, BLOCK_N: int, BLOCK_L: int):
     O = T.empty((N, L, F), dtype)
 
     # TODO: Implement this function
-
+    with T.Kernel(N // BLOCK_N, L // BLOCK_L, threads=32) as (bx, by):
+        X_tile = T.alloc_shared((BLOCK_N, BLOCK_L + KL - 1), dtype)
+        K_tile = T.alloc_shared((KL, F), dtype)
+        XK_reduce = T.alloc_fragment((F), accum_dtype)
+        T.copy(X[bx * BLOCK_N, by * BLOCK_L], X_tile)
+        T.copy(K, K_tile)
+        for i in T.serial(BLOCK_L):
+            for j in T.serial(BLOCK_N):
+                T.clear(XK_reduce)
+                for k in T.serial(KL // 4):
+                    for f in T.Parallel(F):
+                        XK_reduce[f] += (
+                            T.cast(X_tile[j, i + k * 4 + 0], accum_dtype)
+                            * T.cast(K_tile[k * 4 + 0, f], accum_dtype)
+                            + T.cast(X_tile[j, i + k * 4 + 1], accum_dtype)
+                            * T.cast(K_tile[k * 4 + 1, f], accum_dtype)
+                            + T.cast(X_tile[j, i + k * 4 + 2], accum_dtype)
+                            * T.cast(K_tile[k * 4 + 2, f], accum_dtype)
+                            + T.cast(X_tile[j, i + k * 4 + 3], accum_dtype)
+                            * T.cast(K_tile[k * 4 + 3, f], accum_dtype)
+                        )
+                for f in T.Parallel(F):
+                    O[bx * BLOCK_N + j, by * BLOCK_L + i, f] = XK_reduce[f]
     return O
 
 
@@ -226,7 +259,69 @@ def tl_conv1d_im2col(X, K, BLOCK_N: int, BLOCK_L: int):
     O = T.empty((N, L, F), dtype)
 
     # TODO: Implement this function
+    # with T.Kernel(N // BLOCK_N, L // BLOCK_L, threads=32) as (bx, by):
+    #     X_tile = T.alloc_shared((BLOCK_N, BLOCK_L + KL - 1), accum_dtype)
+    #     X_matrix = T.alloc_shared(
+    #         (
+    #             BLOCK_L,
+    #             BLOCK_N,
+    #             KL,
+    #         ),
+    #         accum_dtype,
+    #     )
+    #     K_tile = T.alloc_shared((KL, F), accum_dtype)
+    #     XK_reduce = T.alloc_fragment((BLOCK_N, F), accum_dtype)
+    #     T.copy(X[bx * BLOCK_N, by * BLOCK_L], X_tile)
+    #     T.copy(K, K_tile)
+    #     for i in T.Parallel(BLOCK_L):
+    #         T.copy(X_tile[0:BLOCK_N, i : (i + KL)], X_matrix[i, 0:BLOCK_N, 0:KL])
+    #     T.gemm(X_matrix, K_tile, XK_reduce, clear_accum=True)
+    #     for i in T.Parallel(BLOCK_L):
+    #         T.copy(
+    #             XK_reduce,
+    #             O[
+    #                 (bx * BLOCK_N) : (bx * BLOCK_N + BLOCK_N),
+    #                 (by * BLOCK_L + i),
+    #                 0:F,
+    #             ],
+    #         )
+    BLOCK_M = BLOCK_N * BLOCK_L
 
+    with T.Kernel(
+        T.ceildiv(N, BLOCK_N),
+        T.ceildiv(L, BLOCK_L),
+        threads=256,
+    ) as (bx, by):
+        A_col = T.alloc_shared((BLOCK_M, KL), dtype)
+        K_tile = T.alloc_shared((KL, F), dtype)
+        C_tile = T.alloc_fragment((BLOCK_M, F), accum_dtype)
+
+        for m, k in T.Parallel(BLOCK_M, KL):
+            j = m // BLOCK_L
+            i = m % BLOCK_L
+            n = bx * BLOCK_N + j
+            pos = by * BLOCK_L + i + k
+            A_col[m, k] = T.if_then_else(
+                (n < N) & (pos < L),
+                X[n, pos],
+                0,
+            )
+        T.copy(K, K_tile)
+        T.gemm(
+            A_col,
+            K_tile,
+            C_tile,
+            clear_accum=True,
+        )
+        for m, f in T.Parallel(BLOCK_M, F):
+            j = m // BLOCK_L
+            i = m % BLOCK_L
+
+            n = bx * BLOCK_N + j
+            pos = by * BLOCK_L + i
+
+            if (n < N) & (pos < L):
+                O[n, pos, f] = C_tile[m, f]
     return O
 
 
