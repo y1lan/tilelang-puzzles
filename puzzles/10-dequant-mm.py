@@ -79,9 +79,25 @@ def tl_dequant_matmul(A, B, BLOCK_M: int, BLOCK_N: int, BLOCK_K: int):
     B: T.Tensor((K, N // 2), B_storage_dtype)
     C = T.empty((M, N), A_dtype)
     accum_dtype = T.float32
-
+    STAGES = 3
     # TODO: Implement this function
+    with T.Kernel(M // BLOCK_M, N // BLOCK_N, threads=128) as (bx, by):
+        A_tile = T.alloc_shared((BLOCK_M, BLOCK_K), A_dtype)
+        B_tile = T.alloc_shared((BLOCK_K, BLOCK_N // 2), B_storage_dtype)
+        B_dequant = T.alloc_shared((BLOCK_K, BLOCK_N), A_dtype)
+        C_tile = T.alloc_fragment((BLOCK_M, BLOCK_N), accum_dtype)
 
+        T.use_swizzle(panel_size=10, enable=True)
+        T.clear(C_tile)
+
+        for k in T.Pipelined(K // BLOCK_K, num_stages=STAGES):
+            T.copy(A[bx * BLOCK_M, k * BLOCK_K], A_tile)
+            T.copy(B[k * BLOCK_K, by * (BLOCK_N // 2)], B_tile)
+            for i, j in T.Parallel(BLOCK_K, BLOCK_N // 2):
+                B_dequant[i, j * 2] = (B_tile[i, j] & 0x0F) - 8.0
+                B_dequant[i, j * 2 + 1] = ((B_tile[i, j] >> 4) & 0x0F) - 8.0
+            T.gemm(A_tile, B_dequant, C_tile)
+        T.copy(C_tile, C[bx * BLOCK_M, by * BLOCK_N])
     return C
 
 
